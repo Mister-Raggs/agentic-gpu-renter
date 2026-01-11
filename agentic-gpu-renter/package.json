@@ -1,0 +1,31 @@
+{
+  "name": "agentic-gpu-renter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@10.9.0",
+  "ts-node": {
+    "esm": true,
+    "experimentalSpecifierResolution": "node"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/api/devServer.ts",
+    "lint": "echo 'No lint configured'",
+    "seed:vendor": "node --loader ts-node/esm --experimental-specifier-resolution=node scripts/seedVendor.ts"
+  },
+  "dependencies": {
+    "@coinbase/cdp-sdk": "latest",
+    "@x402/evm": "latest",
+    "@x402/fetch": "latest",
+    "dotenv": "^16.4.5",
+    "mongodb": "^6.6.2",
+    "viem": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
+  }
+}
