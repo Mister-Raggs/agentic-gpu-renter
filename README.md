@@ -1,391 +1,366 @@
-# Architecture Overview
+# 📘 GPU Procurement Agent — Autonomous Cloud GPU Rental Using LLM + MongoDB + x402
 
-## System Design
+This project implements an **autonomous AI agent** capable of renting GPUs from multiple vendors, handling payments via **x402 / Coinbase CDP**, monitoring long-running training jobs, recovering from failures, and maintaining a complete execution history inside **MongoDB**.
 
-This project implements an **autonomous AI agent** that manages GPU rental procurement and payment orchestration using Web3 payment protocols (x402), LLM-based planning, and MongoDB for persistent state management.
+Designed for the **"Prolonged Coordination"** hackathon theme, this agent survives restarts, handles vendor failures, and makes budget-aware decisions using an LLM-powered planner.
 
-### High-Level Architecture
+---
+
+## 🚀 Overview
+
+The agent performs a full lifecycle:
+
+1. **User starts a run** (goal + budget)
+2. Agent reads current state from MongoDB
+3. LLM Planner selects a vendor based on:
+   * price
+   * reliability
+   * past failures
+   * remaining budget
+4. Agent obtains quote from vendor
+5. Agent performs **x402 payment challenge**
+6. Agent submits GPU job
+7. Agent periodically polls job status (stateless)
+8. On failure — the agent automatically retries with a different vendor
+9. On success — metrics + artifacts are saved
+
+Everything is logged to MongoDB via `runs`, `jobs`, `payments`, and `observations`.
+
+---
+
+## 🏗️ System Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Client Layer                             │
-│  (REST API Calls: start run, tick execution, check status)      │
+│              (REST API: start, tick, status)                     │
 └─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
+                              ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                      Vercel Serverless Functions                 │
-│  ┌────────────┐  ┌────────────┐  ┌────────────────┐           │
-│  │ agent-start│  │ agent-tick │  │ agent-status   │           │
-│  └────────────┘  └────────────┘  └────────────────┘           │
+│                  Vercel Serverless Functions                     │
+│                    (Stateless Execution)                         │
 └─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
+                              ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                      Agent Core Logic                            │
-│                                                                   │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Planning Engine (LLM-based Decision Making)             │  │
-│  │  • Fireworks AI (Llama 3 8B)                             │  │
-│  │  • Analyzes budget, vendor reliability, past failures    │  │
-│  │  • Returns structured action: start_job, wait, abort     │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│                                                                   │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Execution Layer                                          │  │
-│  │  • Vendor quote fetching                                 │  │
-│  │  • Job submission with x402 payment handling             │  │
-│  │  • Status polling and observation logging                │  │
-│  └──────────────────────────────────────────────────────────┘  │
+│                      Agent Decision Engine                        │
+│  ┌──────────────────┐         ┌────────────────────────────┐   │
+│  │  LLM Planner     │────────>│   Vendor Selection         │   │
+│  │  (Fireworks AI)  │         │   (Price + Reliability)    │   │
+│  └──────────────────┘         └────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
-                              │
-              ┌───────────────┴───────────────┐
-              ▼                               ▼
-┌──────────────────────────┐    ┌──────────────────────────┐
-│   MongoDB Atlas          │    │  GPU Vendor APIs         │
-│   (State Management)     │    │  (x402-compatible)       │
-│                          │    │                          │
-│  Collections:            │    │  • Quote endpoint        │
-│  • runs                  │    │  • Submit job            │
-│  • jobs                  │    │  • Poll status           │
-│  • payments              │    │  • 402 payment challenge │
-│  • observations          │    └──────────────────────────┘
-│  • vendors               │                 │
-└──────────────────────────┘                 ▼
-                              ┌──────────────────────────┐
-                              │  x402 Payment Protocol   │
-                              │  (Coinbase CDP + EVM)    │
-                              │                          │
-                              │  • Wallet management     │
-                              │  • On-chain settlement   │
-                              │  • Payment receipts      │
-                              └──────────────────────────┘
+              ↓                               ↓
+┌──────────────────────────┐    ┌──────────────────────────────┐
+│   MongoDB Atlas          │    │   x402 Payment Layer         │
+│   (Persistent State)     │    │   (Coinbase CDP)             │
+│                          │    │                              │
+│  • runs                  │    │  • Auto payment challenge    │
+│  • jobs                  │    │  • On-chain settlement       │
+│  • payments              │    │  • Transaction receipts      │
+│  • observations          │    └──────────────────────────────┘
+│  • vendors               │                 ↓
+└──────────────────────────┘    ┌──────────────────────────────┐
+              ↑                  │   GPU Vendor APIs            │
+              └──────────────────│   (Mock/Real Providers)      │
+                                 │                              │
+                                 │  • Get quote                 │
+                                 │  • Submit job                │
+                                 │  • Poll status               │
+                                 └──────────────────────────────┘
 ```
 
-## Core Components
+---
 
-### 1. **Agent Orchestration Layer**
+## 🧠 Component Interaction
 
-#### Stateless Tick Architecture
-Each agent execution is triggered by a `POST /api/agent-tick` call and follows this flow:
+```mermaid
+graph TD
+    User -->|Start Run| API_Start
+    API_Start --> MongoDB
 
-```typescript
-tick(runId) → fetchState(MongoDB) → plan(LLM) → execute(action) → persistState(MongoDB)
+    API_Tick --> MongoDB
+    API_Tick --> PlannerLLM
+    API_Tick --> Vendor1
+    API_Tick --> Vendor2
+    API_Tick --> X402
+
+    PlannerLLM --> MongoDB
+
+    Vendor1 --> X402
+    Vendor2 --> X402
+
+    API_Status --> MongoDB
 ```
 
-**Key Design Decision**: The agent is completely stateless. Every tick:
-- Reads the entire run context from MongoDB (budget, jobs, payments, observations)
-- Makes a fresh decision based on current state
-- Executes the action
-- Writes all state changes back to MongoDB
+### Components
 
-This design enables:
-- Easy horizontal scaling (any instance can process any tick)
-- Crash recovery (no in-memory state loss)
-- Observable execution (full audit trail in MongoDB)
+| Component | Description |
+|-----------|-------------|
+| **Vercel Serverless** | Stateless executor for each "tick" step |
+| **MongoDB Atlas** | Durable state machine + logs |
+| **Fireworks AI / Llama 3** | LLM planning + vendor selection |
+| **x402 / CDP** | Payment challenges + tx receipts |
+| **Mock GPU Vendors** | Simulated 402 flows, failures, training logs |
 
-#### State Machine
+---
 
-```
-START (idle) → PLANNING → EXECUTING → WAITING → [SUCCESS | FAILED]
-                 ↑_____________________________________↓
-                         (retry/recovery loop)
-```
+## 🔄 Failure Recovery — Sequence Diagram
 
-### 2. **LLM-Based Planning Engine**
+```mermaid
+sequenceDiagram
+    participant User
+    participant Agent
+    participant MongoDB
+    participant Vendor1
+    participant Vendor2
+    participant X402
 
-**Location**: [`src/agent/planner.ts`](src/agent/planner.ts)
+    User->>Agent: POST /agent-start
+    Agent->>MongoDB: Create Run (status=running)
 
-The planner uses Fireworks AI (Llama 3 8B) to make intelligent decisions about GPU procurement.
+    Agent->>MongoDB: Read state
+    Agent->>Agent: LLM selects Vendor1
+    Agent->>Vendor1: Request Quote
+    Vendor1-->>Agent: Quote {1.75 USD}
 
-**Input Context**:
-- User's goal (e.g., "Fine-tune tiny-llm")
-- Budget remaining
-- Vendor catalog (price, reliability scores, GPU types)
-- Past job history (successes, failures)
-- Payment history
+    Agent->>X402: Sign Payment (1.75)
+    X402-->>Agent: txId="tx_0xabc113df22"
+    Agent->>Vendor1: submitJob + payment proof
+    Vendor1-->>Agent: jobId="vgpu-11a943" (running)
+    Agent->>MongoDB: Insert Job #1
 
-**Output**: Structured JSON decision
-```typescript
-{
-  action: "start_job" | "wait" | "abort",
-  vendorId?: string,
-  maxHours?: number,
-  reason: string
-}
-```
+    loop poll Vendor1
+        Agent->>Vendor1: GET /job-status
+        Vendor1-->>Agent: progress updates
+        Agent->>MongoDB: add log
+    end
 
-**Fallback Mode**: A "stub" mode is available for deterministic testing without LLM calls.
+    Vendor1-->>Agent: status="failed"
+    Agent->>MongoDB: mark Job #1 failed
 
-**Key Capability**: The LLM can learn from failures and switch vendors if one fails:
-```
-Job fails on gpu_vendor_1 → Next tick → LLM decides → Switch to gpu_vendor_2
-```
+    Agent->>MongoDB: reload history
+    Agent->>Agent: LLM chooses Vendor2
+    Agent->>Vendor2: Request Quote
+    Vendor2-->>Agent: Quote {2.10 USD}
 
-### 3. **x402 Payment Protocol Integration**
+    Agent->>X402: Sign Payment (2.10)
+    X402-->>Agent: txId="tx_0xabc55a92dd"
+    Agent->>Vendor2: submitJob
+    Vendor2-->>Agent: jobId="vgpu-77f244" (running)
+    Agent->>MongoDB: Insert Job #2
 
-**Location**: [`src/x402/client.ts`](src/x402/client.ts), [`src/gpu/vendorApi.ts`](src/gpu/vendorApi.ts)
+    loop poll Vendor2
+        Agent->>Vendor2: GET /job-status
+        Vendor2-->>Agent: progress updates
+        Agent->>MongoDB: write logs
+    end
 
-This project implements the **x402 HTTP payment protocol** - an emerging standard for machine-to-machine micropayments.
-
-#### How it Works
-
-1. **Request Quote**: Agent asks vendor for price estimate
-2. **Submit Job**: Agent attempts to submit job
-3. **402 Payment Required**: Vendor responds with `402` status + payment challenge
-4. **Automatic Payment**: `x402` client intercepts 402, signs transaction on-chain
-5. **Retry with Receipt**: Request retried with `x402TxId` header
-6. **Job Approved**: Vendor verifies payment and starts job
-
-```typescript
-// x402-aware fetch automatically handles payment challenges
-const response = await fetchWithPayment('/submit-job', { ... });
-// If 402 is returned, payment happens transparently
-// Response contains: { vendorJobId, status, paymentTxId }
+    Vendor2-->>Agent: status="completed", metrics
+    Agent->>MongoDB: finalize job + run
+    Agent-->>User: run completed
 ```
 
-**Integration Stack**:
-- **Coinbase Developer Platform (CDP)**: Wallet management and signing
-- **@x402/fetch**: Middleware for automatic 402 handling
-- **@x402/evm**: Ethereum-based payment settlement
-- **viem**: Low-level transaction signing
+---
 
-### 4. **MongoDB Data Model**
+## 📄 Failure Recovery JSON Log (Sample)
 
-**Location**: [`src/db/models.ts`](src/db/models.ts)
-
-#### Collections
-
-**`runs`** - Agent execution contexts
-```typescript
-{
-  _id: ObjectId,
-  userId: string,
-  goal: string,
-  status: "running" | "completed" | "failed",
-  budgetTotal: number,
-  budgetRemaining: number,
-  createdAt: Date,
-  updatedAt: Date
-}
-```
-
-**`jobs`** - GPU rental jobs
-```typescript
-{
-  _id: ObjectId,
-  runId: ObjectId,
-  vendorId: string,
-  vendorJobId: string,
-  status: "submitted" | "running" | "completed" | "failed",
-  expectedCost: number,
-  actualCost: number,
-  jobParams: object,
-  createdAt: Date,
-  completedAt?: Date
-}
-```
-
-**`payments`** - Payment records
-```typescript
-{
-  _id: ObjectId,
-  runId: ObjectId,
-  jobId: ObjectId,
-  vendorId: string,
-  amount: number,
-  currency: string,
-  status: "pending" | "completed" | "failed",
-  x402TxId: string,  // On-chain transaction ID
-  createdAt: Date
-}
-```
-
-**`observations`** - Execution logs (for debugging and transparency)
-```typescript
-{
-  _id: ObjectId,
-  runId: ObjectId,
-  type: "agent_reasoning" | "job_log" | "error" | "payment_event",
-  content: string,
-  timestamp: Date
-}
-```
-
-**`vendors`** - GPU provider registry
-```typescript
-{
-  _id: ObjectId,
-  vendorId: string,
-  name: string,
-  endpoint: string,
-  basePricePerHour: number,
-  reliabilityScore: number,
-  supportedGpuTypes: string[],
-  createdAt: Date
-}
-```
-
-### 5. **GPU Vendor API Client**
-
-**Location**: [`src/gpu/vendorApi.ts`](src/gpu/vendorApi.ts)
-
-Abstracts vendor communication with three key operations:
-
-1. **`getQuote(vendor, params)`** - Get price estimate
-2. **`submitJob(vendor, args)`** - Start job (with x402 payment)
-3. **`pollJobStatus(vendor, vendorJobId)`** - Check progress
-
-The client automatically handles:
-- x402 payment challenges
-- Retry logic on 402 responses
-- Payment receipt extraction
-- Error handling and logging
-
-### 6. **Mock GPU Vendor**
-
-**Location**: [`gpu-vendor-mock/`](gpu-vendor-mock/)
-
-A testing harness that simulates:
-- x402 payment challenges (returns 402 status)
-- Job execution with realistic progress
-- Configurable failure injection (`FAIL_VENDOR_ID`, `FAIL_RATE`)
-- Multi-epoch training simulation
-
-This allows full end-to-end testing without real GPU providers or payments.
-
-## API Endpoints
-
-### `POST /api/agent-start`
-Initialize a new agent run
 ```json
-Request: {
-  "userId": "u1",
-  "goal": "Fine-tune tiny-llm",
-  "budgetTotal": 5
-}
-
-Response: {
-  "_id": "66a1f2c9d53a3f9ef1f0c123",
-  "status": "running",
-  "budgetTotal": 5,
-  "budgetRemaining": 5
-}
-```
-
-### `POST /api/agent-tick`
-Advance agent execution by one step
-```json
-Request: {
-  "runId": "66a1f2c9d53a3f9ef1f0c123"
-}
-
-Response: {
-  "message": "Job started",
-  "action": {
-    "action": "start_job",
-    "vendorId": "gpu_vendor_1",
-    "reason": "Best price/reliability ratio"
-  }
-}
-```
-
-### `GET /api/agent-status?runId=...`
-Get comprehensive run state
-```json
-Response: {
-  "run": { 
-    "status": "running", 
-    "budgetRemaining": 3.6 
+{
+  "run": {
+    "_id": "679fdc0a9a4f5d03f2a9c7b1",
+    "goal": "Fine-tune tiny-llm on dataset A",
+    "status": "running",
+    "budgetTotal": 5.0,
+    "budgetRemaining": 2.45
   },
-  "jobs": [...],
-  "payments": [...],
-  "observations": [...]
+  "jobs": [
+    {
+      "_id": "679fdc1c9a4f5d03f2a9c7b2",
+      "vendorId": "gpu_vendor_1",
+      "status": "failed",
+      "errorMessage": "Vendor crashed at 47% progress"
+    },
+    {
+      "_id": "679fdc3e9a4f5d03f2a9c7b3",
+      "vendorId": "gpu_vendor_2",
+      "status": "completed",
+      "artifactUrl": "https://mock-storage/gpu_vendor_2/model-final.bin"
+    }
+  ],
+  "payments": [
+    {
+      "vendorId": "gpu_vendor_1",
+      "status": "completed",
+      "x402TxId": "tx_0xabc113df22"
+    },
+    {
+      "vendorId": "gpu_vendor_2",
+      "status": "completed",
+      "x402TxId": "tx_0xabc55a92dd"
+    }
+  ],
+  "observations": [
+    {
+      "type": "agent_reasoning",
+      "content": "Vendor1 is cheapest; starting job"
+    },
+    {
+      "type": "error",
+      "content": "Vendor1 failed at 47%"
+    },
+    {
+      "type": "agent_reasoning",
+      "content": "Vendor1 failed previously; switching to vendor2"
+    }
+  ]
 }
 ```
 
-## Key Technical Decisions
+---
 
-### Why Stateless Agent Design?
-- **Scalability**: No session affinity required
-- **Reliability**: Crashes don't lose progress
-- **Debugging**: Full execution trace in MongoDB
-- **Cost**: Can run on serverless (Vercel Functions)
+## 🛠️ Tech Stack
 
-### Why LLM for Planning?
-- **Adaptability**: Can handle vendor failures, budget changes dynamically
-- **Explainability**: Returns reasoning for each decision
-- **No hardcoding**: Easily adapts to new vendors or constraints
+### Backend
+- **TypeScript**
+- **Node.js**
+- **Vercel Serverless Functions**
 
-### Why x402 Payment Protocol?
-- **Automation**: No manual payment approval needed
-- **Speed**: Instant settlement vs. traditional invoicing
-- **Machine-native**: Designed for AI agent interactions
-- **Auditability**: On-chain payment trail
+### Storage
+- **MongoDB Atlas**
+  - `runs`
+  - `jobs`
+  - `payments`
+  - `observations`
+  - `vendors`
 
-### Why MongoDB?
-- **Schema flexibility**: Easy to add new observation types
-- **Developer experience**: Rich querying for debugging
-- **Atlas**: Managed service, no ops overhead
-- **Document model**: Natural fit for agent state
+### AI
+- **Fireworks AI / Llama 3**
+- Deterministic fallback mode for testing
 
-## Deployment Architecture
+### Payments
+- **x402 protocol**
+- **Coinbase CDP** (signing + transaction receipts)
+- Automatic 402 challenge retry
 
-```
-Vercel (Serverless Functions)
-├── /api/agent-start.ts
-├── /api/agent-tick.ts
-└── /api/agent-status.ts
+### Vendor Simulation
+- Local mock GPU vendor services:
+  - `/quote`
+  - `/submit-job`
+  - `/job-status`
+  - configurable failure modes
 
-MongoDB Atlas (Shared Cluster)
-├── runs collection
-├── jobs collection
-├── payments collection
-├── observations collection
-└── vendors collection
+---
 
-Coinbase CDP (Wallet Service)
-└── EVM wallet for x402 payments
+## ▶️ Local Development
 
-External Services
-├── Fireworks AI (LLM API)
-└── GPU Vendors (x402-compatible)
+```bash
+git clone https://github.com/Mister-Raggs/agentic-gpu-renter.git
+cd agentic-gpu-renter
+cp .env.example .env
+npm install
 ```
 
-## Development Workflow
+### 1. Start mock vendor services
 
-1. **Local Development**:
-   ```bash
-   npm run dev  # Starts dev server on localhost:3000
-   ```
+```bash
+cd gpu-vendor-mock
+npm install
+GPU_VENDOR_SECRET="dev_secret_123" npm run dev
+```
 
-2. **Testing with Mock Vendor**:
-   ```bash
-   cd gpu-vendor-mock && npm run dev  # Port 4001
-   ```
+### 2. Seed MongoDB with vendors
 
-3. **Seeding Test Data**:
-   ```bash
-   npm run seed:vendor  # Creates gpu_vendor_1, gpu_vendor_2
-   ```
+```bash
+cd agentic-gpu-renter
+npm run seed:vendor
+```
 
-4. **Production Deployment**:
-   ```bash
-   vercel deploy --prod
-   ```
+### 3. Start local dev API
 
-## Security Considerations
+```bash
+npm run dev
+```
 
-- **Secret Management**: All API keys in environment variables, never committed
-- **x402 Wallet**: Private keys secured via CDP, never exposed
-- **Vendor Authentication**: Bearer token authentication on all vendor APIs
-- **Budget Enforcement**: Agent cannot exceed `budgetRemaining` (enforced in planner)
-- **Payment Verification**: Vendors verify on-chain payment before starting jobs
+---
 
-## Future Enhancements
+## 📡 API Endpoints
 
-- **Multi-agent coordination**: Parallel job execution across vendors
-- **Real-time WebSocket updates**: Push status changes to clients
-- **Cost optimization**: A/B testing different LLM models for planning
-- **Payment aggregation**: Batch multiple micro-payments
-- **Vendor reputation system**: Learn from community feedback
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/agent-start` | POST | Start a new run |
+| `/api/agent-tick` | POST | Execute one decision/action cycle |
+| `/api/agent-status` | GET | View run + jobs + payments + logs |
+
+---
+
+## 🧪 Demo Script (for judges)
+
+1. Seed vendors
+2. Start mock vendor services
+3. `POST /agent-start` → shows run with full budget
+4. Call `/agent-tick` repeatedly
+   - Vendor1 quote OK
+   - Payment complete
+   - Job starts
+5. Simulated vendor failure occurs
+6. Agent logs error → switches to Vendor2
+7. Second payment
+8. Second job runs to completion
+9. `/agent-status` shows full recovery trace
+10. Show JSON log + sequence diagram (in README)
+
+Total demo time: < **2 minutes**
+
+---
+
+## 📌 Key Features
+
+- Stateless execution: every tick loads and stores state in MongoDB
+- Full durable state machine
+- LLM-based planning with JSON actions
+- Automatic payment challenges + retries
+- Retry logic across unreliable vendors
+- Observability via typed event logs
+- Drop-in replacement for real GPU providers
+
+---
+
+## 🧭 Future Work
+
+- Add real GPU rental APIs (RunPod, Lambda, Vast) behind x402 wrappers
+- Vendor reputation scoring via embeddings (Voyage AI)
+- Automatic benchmarking of vendor performance
+- Cost optimization planner
+- Multi-agent negotiation between vendors
+
+---
+
+## 📚 Detailed Architecture
+
+For deep technical dive into system design, component breakdown, and design decisions, see the inline documentation:
+
+- [Agent Planner](agentic-gpu-renter/src/agent/planner.ts) - LLM-based decision making
+- [x402 Client](agentic-gpu-renter/src/x402/client.ts) - Payment protocol integration
+- [Vendor API](agentic-gpu-renter/src/gpu/vendorApi.ts) - GPU vendor abstraction
+- [Data Models](agentic-gpu-renter/src/db/models.ts) - MongoDB schema
+
+---
+
+## 📝 Environment Variables
+
+Create `agentic-gpu-renter/.env`:
+
+```bash
+MONGODB_URI=
+MONGODB_DB_NAME=
+FIREWORKS_API_KEY=
+FIREWORKS_MODEL=accounts/fireworks/models/llama-v3-8b-instruct
+GPU_VENDOR_SECRET=dev_secret_123
+CDP_API_KEY_ID=
+CDP_API_KEY_SECRET=
+CDP_WALLET_SECRET=
+PLANNER_MODE=stub  # or "llm"
+```
+
+---
+
+Built with ❤️ for MongoDB Agentic AI Hackathon
